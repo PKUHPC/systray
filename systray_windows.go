@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -146,6 +147,22 @@ type notifyIconData struct {
 	InfoFlags                  uint32
 	GuidItem                   GUID
 	BalloonIcon                Handle
+}
+
+type compatNotifyIconData struct {
+	CbSize           uint32
+	HWnd             syscall.Handle
+	UID              uint32
+	UFlags           uint32
+	UCallbackMessage uint32
+	HIcon            syscall.Handle
+	SzTip            [128]uint16
+	DwState          uint32
+	DwStateMask      uint32
+	SzInfo           [256]uint16
+	UVersion         uint32
+	SzInfoTitle      [64]uint16
+	DwInfoFlags      uint32
 }
 
 func (nid *notifyIconData) add() error {
@@ -1119,69 +1136,86 @@ func resetMenu() {
 
 // showNotification displays a system tray notification on Windows
 func showNotification(title, message string) {
-	go func() {
-		if !wt.isReady() {
-			log.Printf("systray error: cannot show notification: tray not ready yet\n")
-			return
-		}
+    go func() {
+        if !wt.isReady() {
+            log.Printf("systray error: cannot show notification: tray not ready yet\n")
+            return
+        }
 
-		// Find the systray window handle
-		className, err := syscall.UTF16PtrFromString("SystrayClass")
-		if err != nil {
-			log.Printf("systray error: failed to convert class name: %v\n", err)
-			return
-		}
-		
-		hwnd, _, err := pFindWindow.Call(
-			uintptr(unsafe.Pointer(className)),
-			0,
-		)
-		if hwnd == 0 {
-			log.Printf("systray error: failed to find systray window: %v\n", err)
-			return
-		}
+        // 动态查找窗口句柄，避免使用预存的
+        hwnd, err := getSystrayWindowHandle()
+        if err != nil {
+            log.Printf("systray error: failed to get systray window handle: %v\n", err)
+            return
+        }
 
-		// Convert strings to UTF-16
-		wTitle, err := syscall.UTF16FromString(title)
-		if err != nil {
-			log.Printf("systray error: failed to convert title: %v\n", err)
-			return
-		}
+        if err := displayCompatNotification(hwnd, title, message); err != nil {
+            log.Printf("systray error: failed to display notification: %v\n", err)
+        }
+    }()
+}
 
-		wMessage, err := syscall.UTF16FromString(message)
-		if err != nil {
-			log.Printf("systray error: failed to convert message: %v\n", err)
-			return
-		}
+func getSystrayWindowHandle() (syscall.Handle, error) {
+    // 动态获取User32.dll句柄
+    user32 := syscall.NewLazyDLL("User32.dll")
+    findWindow := user32.NewProc("FindWindowW")
+    
+    className, err := syscall.UTF16PtrFromString("SystrayClass")
+    if err != nil {
+        return 0, err
+    }
+    
+    hwnd, _, err := findWindow.Call(
+        uintptr(unsafe.Pointer(className)),
+        0,
+    )
+    if hwnd == 0 {
+        return 0, fmt.Errorf("systray window handle not found: %v", err)
+    }
+    return syscall.Handle(hwnd), nil
+}
 
-		wTip, err := syscall.UTF16FromString("SystrayClass")
-		if err != nil {
-			log.Printf("systray error: failed to convert tooltip: %v\n", err)
-			return
-		}
+func displayCompatNotification(hwnd syscall.Handle, title, message string) error {
+    // 动态获取Shell32.dll句柄，避免使用全局预加载的
+    shell32 := syscall.NewLazyDLL("Shell32.dll")
+    procShellNotifyIcon := shell32.NewProc("Shell_NotifyIconW")
+    
+    wTitle, err := syscall.UTF16FromString(title)
+    if err != nil {
+        return fmt.Errorf("failed to convert title: %w", err)
+    }
 
-		// Create notification data
-		nid := notifyIconData{
-			Size:             uint32(unsafe.Sizeof(notifyIconData{})),
-			Wnd:              Handle(hwnd),
-			ID:               100,
-			Flags:            NIF_INFO | NIF_TIP,
-			CallbackMessage:  WM_USER + 1,
-			InfoFlags:        NIIF_INFO,
-		}
+    wMessage, err := syscall.UTF16FromString(message)
+    if err != nil {
+        return fmt.Errorf("failed to convert message: %w", err)
+    }
 
-		copy(nid.InfoTitle[:], wTitle)
-		copy(nid.Info[:], wMessage)
-		copy(nid.Tip[:], wTip)
+    wTip, err := syscall.UTF16FromString("ShadowDesk")
+    if err != nil {
+        return fmt.Errorf("failed to convert tooltip: %w", err)
+    }
 
-		// Show notification
-		ret, _, _ := pShellNotifyIcon.Call(
-			uintptr(NIM_MODIFY),
-			uintptr(unsafe.Pointer(&nid)),
-		)
+    nid := compatNotifyIconData{
+        CbSize:           uint32(unsafe.Sizeof(compatNotifyIconData{})),
+        HWnd:             hwnd,
+        UID:              100,
+        UFlags:           NIF_INFO | NIF_TIP,
+        UCallbackMessage: WM_USER + 1,
+        DwInfoFlags:      NIIF_INFO,
+    }
 
-		if ret == 0 {
-			log.Printf("systray error: failed to display notification\n")
-		}
-	}()
+    copy(nid.SzInfoTitle[:], wTitle)
+    copy(nid.SzInfo[:], wMessage)
+    copy(nid.SzTip[:], wTip)
+
+    ret, _, err := procShellNotifyIcon.Call(
+        uintptr(NIM_MODIFY),
+        uintptr(unsafe.Pointer(&nid)),
+    )
+
+    if ret == 0 {
+        return fmt.Errorf("Shell_NotifyIcon failed: %v", err)
+    }
+
+    return nil
 }
