@@ -229,7 +229,6 @@ type winTray struct {
 	icon,
 	cursor,
 	window Handle
-	trayIconID uint32
 
 	loadedImages   map[string]Handle
 	muLoadedImages sync.RWMutex
@@ -512,10 +511,9 @@ func (t *winTray) initInstance() error {
 
 	t.muNID.Lock()
 	defer t.muNID.Unlock()
-	t.trayIconID = uint32(os.Getpid())
 	t.nid = &notifyIconData{
 		Wnd:             Handle(t.window),
-		ID:  			 t.trayIconID,
+		ID:               100,
 		Flags:           NIF_MESSAGE,
 		CallbackMessage: t.wmSystrayMessage,
 	}
@@ -1166,7 +1164,7 @@ func showNotification(title, message string) {
 		nid := notifyIconData{
 			Size:             uint32(unsafe.Sizeof(notifyIconData{})),
 			Wnd:              Handle(hwnd),
-			ID:               wt.trayIconID,
+			ID:               100,
 			Flags:            NIF_INFO | NIF_TIP,
 			CallbackMessage:  WM_USER + 1,
 			InfoFlags:        NIIF_INFO,
